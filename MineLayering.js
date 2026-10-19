@@ -34,6 +34,17 @@ function wrapper() { // wrapper for injection
 
 	var plugin_version = 1.0;
 
+	//map button icon: white mine inside a red "no" circle with a slash
+	var hide_mines_icon = "data:image/svg+xml," + encodeURIComponent(
+		"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>" +
+		"<g stroke='#FFFFFF' stroke-width='1.6' stroke-linecap='round'>" +
+		"<path d='M12 5.5V18.5M5.5 12H18.5M7.4 7.4L16.6 16.6M16.6 7.4L7.4 16.6'/>" +
+		"</g>" +
+		"<circle cx='12' cy='12' r='4.2' fill='#FFFFFF'/>" +
+		"<circle cx='12' cy='12' r='10' fill='none' stroke='#FF2020' stroke-width='2'/>" +
+		"<path d='M4.9 4.9L19.1 19.1' stroke='#FF2020' stroke-width='2' stroke-linecap='round'/>" +
+		"</svg>");
+
 	console.log("MineLayering plugin version: v" + plugin_version);
 
 	var mineLayeringPlugin =
@@ -57,10 +68,12 @@ function wrapper() { // wrapper for injection
 			var plugin = vgap.plugins["mineLayeringPlugin"];
 			if (!plugin.mobile_version) {
 				vgap.map.addMapTool("<span style=\"color:#FFFF00\">Mine Layering</span>", "ShowMinerals", function () { plugin.toggleOverlay(); });
+				vgap.map.addMapTool("<span style=\"color:#FF2020\">Hide Minefields</span>", "ShowMinerals", function () { plugin.toggleHideMinefields(); });
 				return;
 			}
 
 			vgap.map.addMapTool("Minefield Layering", "minelayermenu", function () { plugin.toggleOverlay(); });
+			vgap.map.addMapTool("Hide Minefields", "minehidemenu", function () { plugin.toggleHideMinefields(); });
 
 			var head = document.getElementsByTagName('head')[0];
 			if (head) {
@@ -69,6 +82,9 @@ function wrapper() { // wrapper for injection
 				newCss.innerHTML = ".minelayermenu::before { content: \"\\f192\"; color: #FFFFFF }";
 				newCss.innerHTML += ".minelayermenu.minelayeractive::before { color: #FFFF00 }";
 				newCss.innerHTML += ".minelayermenu.minelayeractive { box-shadow: inset 0 0 0 2px #FFFF00 }";
+				newCss.innerHTML += ".minehidemenu::before { content: \"\" }";
+				newCss.innerHTML += ".minehidemenu { background-image: url(\"" + hide_mines_icon + "\") !important; background-repeat: no-repeat !important; background-position: center !important; background-size: 55% !important; }";
+				newCss.innerHTML += ".minehidemenu.minehideactive { box-shadow: inset 0 0 0 2px #FF2020 }";
 				newCss.innerHTML += "#MineLayerTool { position: absolute; right: 50px; z-index: 9; padding: 4px; background: rgba(0,0,0,0.6); color: #FFFFFF; white-space: nowrap; }";
 				head.appendChild(newCss);
 			}
@@ -102,6 +118,7 @@ function wrapper() { // wrapper for injection
 		version: plugin_version,
 		mobile_version: (vgap.version >= 4.0),
 		active: false,
+		hideMinefields: false,
 		fieldType: "normal",	//which of your field types to layer: normal, web or hidden
 		fillColor: "rgba(255,255,0,0.5)",
 		spanCache: null,	//layering grid squares, recomputed when the minefields or field type change
@@ -112,6 +129,15 @@ function wrapper() { // wrapper for injection
 
 		toggleOverlay: function () {
 			this.setActive(!this.active);
+		},
+
+		/**
+		 * Show or hide all minefields on the starmap
+		 */
+		toggleHideMinefields: function () {
+			this.hideMinefields = !this.hideMinefields;
+			$(".minehidemenu").toggleClass("minehideactive", this.hideMinefields);
+			vgap.map.draw();
 		},
 
 		setActive: function (active) {
@@ -285,6 +311,21 @@ function wrapper() { // wrapper for injection
 
 	// register your plugin with NU
 	vgap.registerPlugin(mineLayeringPlugin, "mineLayeringPlugin");
+
+
+	vgap.plugins["mineLayeringPlugin"].oldDrawMinefield = vgapMap.prototype.drawMinefield;
+
+	/**
+	 * Overload drawMinefield so minefields can be hidden from the starmap.
+	 */
+	vgapMap.prototype.drawMinefield = function () {
+		var plugin = vgap.plugins["mineLayeringPlugin"];
+		if (plugin.hideMinefields)
+			return;
+
+		//execute the normal drawMinefield function
+		plugin.oldDrawMinefield.apply(this, arguments);
+	};
 
 
 	vgap.plugins["mineLayeringPlugin"].oldClearTools = vgapMap.prototype.clearTools;
