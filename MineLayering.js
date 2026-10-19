@@ -18,8 +18,9 @@ How it works:
 When a ship lays mines, the host looks for your own minefield of the same type whose centre is closest to the
 ship. If the ship is inside that closest field the mines are added to it, otherwise a new field is created.
 So a point inside one of your fields (A) still gets a NEW field when the centre of another of your fields (B)
-is closer than A's centre and the point is outside B. The hatched region is every such point: inside at least
-one of your fields, but outside the field whose centre is nearest.
+is closer than A's centre and the point is outside B. Ships sit on whole light year coordinates, so the overlay
+fills every grid square where this holds: inside at least one of your fields, but outside the field whose
+centre is nearest.
 
 Change log:
 1.0    Initial release [2026-10-18]
@@ -102,10 +103,8 @@ function wrapper() { // wrapper for injection
 		mobile_version: (vgap.version >= 4.0),
 		active: false,
 		fieldType: "normal",	//which of your field types to layer: normal, web or hidden
-		hatchColor: "rgba(255,255,0,0.75)",
-		edgeColor: "rgba(255,255,0,0.9)",
-		hatchSpacing: 8,	//screen pixels between hatch lines
-		hatchPattern: null,
+		fillColor: "rgba(255,255,0,0.5)",
+		spanCache: null,	//layering grid squares, recomputed when the minefields or field type change
 
 		/***************************************************************************************
 		 * Custom plugin methods
@@ -173,125 +172,113 @@ function wrapper() { // wrapper for injection
 		},
 
 		/**
-		 * Yellow cross hatch pattern, created once
+		 * Work out which grid squares let a ship lay a new field that overlaps one of your fields, as row spans.
+		 * Same rule as the client's mine laying prediction: the mines join your closest field (by centre, first
+		 * in list order on a tie) of the same type, unless the ship is outside that field.
+		 * @return      {minY, maxY, rows: {y: [[x0, x1], ...]}}
 		 */
-		getHatchPattern: function (ctx) {
-			if (!this.hatchPattern) {
-				var size = this.hatchSpacing;
-				var tile = document.createElement("canvas");
-				tile.width = size;
-				tile.height = size;
-				var tctx = tile.getContext("2d");
-				tctx.strokeStyle = this.hatchColor;
-				tctx.lineWidth = 1;
-				tctx.beginPath();
-				//both diagonals, extended past the tile so the lines join up seamlessly when repeated
-				tctx.moveTo(-1, -1);
-				tctx.lineTo(size + 1, size + 1);
-				tctx.moveTo(size + 1, -1);
-				tctx.lineTo(-1, size + 1);
-				tctx.stroke();
-				this.hatchPattern = ctx.createPattern(tile, "repeat");
-			}
-			return this.hatchPattern;
-		},
-
-		/**
-		 * Cross hatch every point inside one of your fields where laying mines creates a new field.
-		 * For each field B the points whose nearest field centre is B (B's Voronoi cell) join B when inside it,
-		 * so the layering region of B is: B's cell, outside B, inside some other field.
-		 */
-		drawLayeringRegions: function () {
-			var map = vgap.map;
-			var ctx = map.ctx;
+		getLayeringSpans: function () {
+			var cache = this.spanCache;
+			if (cache && cache.minefields === vgap.minefields && cache.count == vgap.minefields.length && cache.fieldType == this.fieldType && cache.playerId == vgap.player.id)
+				return cache;
 
 			var fields = [];
 			var maxRadius = 0;
 			for (var i = 0; i < vgap.minefields.length; i++) {
 				var mf = vgap.minefields[i];
 				if (mf.ownerid == vgap.player.id && this.getFieldType(mf) == this.fieldType) {
-					fields.push({ x: mf.x, y: mf.y, radius: mf.radius, sx: map.screenX(mf.x), sy: map.screenY(mf.y), srad: mf.radius * map.zoom });
+					fields.push(mf);
 					maxRadius = Math.max(maxRadius, mf.radius);
 				}
 			}
-			if (fields.length < 2)
-				return;
 
-			//generous screen rect used to build half-plane and "everything except this circle" clip paths
-			var w = ctx.canvas.width;
-			var h = ctx.canvas.height;
-			var big = Math.max(w, h) * 4;
-			var pattern = this.getHatchPattern(ctx);
-
-			for (var b = 0; b < fields.length; b++) {
-				var fb = fields[b];
-				//a hatched point is inside some field A and no further from B than from A, so within maxRadius of B
-				if (!map.isVisible(fb.x, fb.y, maxRadius))
-					continue;
-
-				//fields close enough to B to overlap B's cell or bound it
-				var near = [];
-				for (var c = 0; c < fields.length; c++) {
-					if (c != b && Math.dist(fb.x, fb.y, fields[c].x, fields[c].y) < fb.radius + maxRadius + maxRadius)
-						near.push(fields[c]);
-				}
-				if (near.length == 0)
-					continue;
-
-				ctx.save();
-
-				//inside at least one other field
-				ctx.beginPath();
-				for (var n = 0; n < near.length; n++) {
-					ctx.moveTo(near[n].sx + near[n].srad, near[n].sy);
-					ctx.arc(near[n].sx, near[n].sy, near[n].srad, 0, Math.PI * 2, false);
-				}
-				ctx.clip();
-
-				//outside B: the mines would join B
-				ctx.beginPath();
-				ctx.rect(-big, -big, big * 2 + w, big * 2 + h);
-				ctx.moveTo(fb.sx + fb.srad, fb.sy);
-				ctx.arc(fb.sx, fb.sy, fb.srad, 0, Math.PI * 2, true);
-				ctx.clip();
-
-				//B's centre is the nearest: the half-plane on B's side of the bisector with each nearby field
-				for (var n = 0; n < near.length; n++) {
-					var dx = near[n].sx - fb.sx;
-					var dy = near[n].sy - fb.sy;
-					var len = Math.sqrt(dx * dx + dy * dy);
-					if (len == 0)
-						continue;
-					var nx = dx / len;
-					var ny = dy / len;
-					var mx = (fb.sx + near[n].sx) / 2;
-					var my = (fb.sy + near[n].sy) / 2;
-					ctx.beginPath();
-					ctx.moveTo(mx - ny * big, my + nx * big);
-					ctx.lineTo(mx + ny * big, my - nx * big);
-					ctx.lineTo(mx + ny * big - nx * big, my - nx * big - ny * big);
-					ctx.lineTo(mx - ny * big - nx * big, my + nx * big - ny * big);
-					ctx.closePath();
-					ctx.clip();
-				}
-
-				ctx.fillStyle = pattern;
-				ctx.fillRect(-big, -big, big * 2 + w, big * 2 + h);
-
-				//outline the region; the clip keeps only the circle edges that border it
-				ctx.strokeStyle = this.edgeColor;
-				ctx.lineWidth = 2;
-				ctx.beginPath();
-				ctx.moveTo(fb.sx + fb.srad, fb.sy);
-				ctx.arc(fb.sx, fb.sy, fb.srad, 0, Math.PI * 2, false);
-				for (var n = 0; n < near.length; n++) {
-					ctx.moveTo(near[n].sx + near[n].srad, near[n].sy);
-					ctx.arc(near[n].sx, near[n].sy, near[n].srad, 0, Math.PI * 2, false);
-				}
-				ctx.stroke();
-
-				ctx.restore();
+			var rows = {};
+			var minY = Infinity;
+			var maxY = -Infinity;
+			for (var i = 0; i < fields.length; i++) {
+				minY = Math.min(minY, Math.ceil(fields[i].y - fields[i].radius));
+				maxY = Math.max(maxY, Math.floor(fields[i].y + fields[i].radius));
 			}
+
+			for (var y = minY; y <= maxY; y++) {
+				//x ranges of this row that lie inside one of your fields, merged
+				var ranges = [];
+				//the closest centre to a point inside a field is at most maxRadius away
+				var candidates = [];
+				for (var i = 0; i < fields.length; i++) {
+					var dy = Math.abs(fields[i].y - y);
+					if (dy <= fields[i].radius) {
+						var half = Math.sqrt(fields[i].radius * fields[i].radius - dy * dy);
+						ranges.push([Math.ceil(fields[i].x - half), Math.floor(fields[i].x + half)]);
+					}
+					if (dy <= maxRadius)
+						candidates.push(fields[i]);
+				}
+				if (ranges.length == 0)
+					continue;
+				ranges.sort(function (a, b) { return a[0] - b[0]; });
+
+				var spans = [];
+				var lastX = -Infinity;
+				for (var r = 0; r < ranges.length; r++) {
+					for (var x = Math.max(ranges[r][0], lastX + 1); x <= ranges[r][1]; x++) {
+						var closest = null;
+						var closestDist = 10000.0;
+						for (var c = 0; c < candidates.length; c++) {
+							var dist = Math.dist(x, y, candidates[c].x, candidates[c].y);
+							if (dist < closestDist) {
+								closest = candidates[c];
+								closestDist = dist;
+							}
+						}
+						if (closest && closestDist > closest.radius) {
+							var last = spans[spans.length - 1];
+							if (last && last[1] == x - 1)
+								last[1] = x;
+							else
+								spans.push([x, x]);
+						}
+					}
+					lastX = Math.max(lastX, ranges[r][1]);
+				}
+				if (spans.length > 0)
+					rows[y] = spans;
+			}
+
+			this.spanCache = { minefields: vgap.minefields, count: vgap.minefields.length, fieldType: this.fieldType, playerId: vgap.player.id, minY: minY, maxY: maxY, rows: rows };
+			return this.spanCache;
+		},
+
+		/**
+		 * Fill every grid square where a ship can lay a new field inside one of your fields
+		 */
+		drawLayeringRegions: function () {
+			var map = vgap.map;
+			var ctx = map.ctx;
+			var cache = this.getLayeringSpans();
+
+			var canvas = map.canvas;
+			var fromY = Math.max(cache.minY, Math.floor(canvas.y) - 1);
+			var toY = Math.min(cache.maxY, Math.ceil(canvas.y + canvas.mapheight) + 1);
+			var fromX = Math.floor(canvas.x) - 1;
+			var toX = Math.ceil(canvas.x + canvas.mapwidth) + 1;
+
+			//one path for all squares so fractional squares when zoomed out do not stack their transparency
+			ctx.save();
+			ctx.fillStyle = this.fillColor;
+			ctx.beginPath();
+			for (var y = fromY; y <= toY; y++) {
+				var spans = cache.rows[y];
+				if (!spans)
+					continue;
+				for (var s = 0; s < spans.length; s++) {
+					if (spans[s][1] < fromX || spans[s][0] > toX)
+						continue;
+					ctx.rect(map.screenX(spans[s][0] - 0.5), map.screenY(y + 0.5), (spans[s][1] - spans[s][0] + 1) * map.zoom, map.zoom);
+				}
+			}
+			ctx.fill();
+			ctx.restore();
 		}
 
 	}; //end mineLayeringPlugin
