@@ -22,6 +22,11 @@ is closer than A's centre and the point is outside B. Ships sit on whole light y
 fills every grid square where this holds: inside at least one of your fields, but outside the field whose
 centre is nearest.
 
+The squares are for laying mines NEXT turn. Host order is mine laying, sweeping, decay, ..., movement, so a ship
+moved into position this turn lays against fields that have taken this turn's mine laying (as predicted by the
+client from your ships' orders) and lost 5% of their mines to decay. Sweeping and mines destroying mines are not
+predicted.
+
 Change log:
 1.0    Initial release [2026-10-18]
 */
@@ -121,7 +126,8 @@ function wrapper() { // wrapper for injection
 		hideMinefields: false,
 		fieldType: "normal",	//which of your field types to layer: normal, web or hidden
 		fillColor: "rgba(255,255,0,0.5)",
-		spanCache: null,	//layering grid squares, recomputed when the minefields or field type change
+		decayRate: 0.05,	//share of each minefield lost to decay every turn
+		spanCache: null,	//layering grid squares, recomputed when the predicted minefields or field type change
 
 		/***************************************************************************************
 		 * Custom plugin methods
@@ -198,25 +204,61 @@ function wrapper() { // wrapper for injection
 		},
 
 		/**
-		 * Work out which grid squares let a ship lay a new field that overlaps one of your fields, as row spans.
+		 * Your minefields as they will be when mines are laid next turn. Host order is mine laying, sweeping,
+		 * decay, ..., movement, so a ship moving into position this turn lays next turn against fields that have
+		 * taken this turn's mine laying (the client's own prediction) and one round of decay.
+		 * @return      list of {x, y, radius, type}
+		 */
+		getNextTurnMinefields: function () {
+			var predicted = null;
+			try {
+				if (typeof vgapShipScreen != "undefined" && vgapShipScreen.prototype.predictedMineLaying) {
+					//the ship argument only matters for its own torp count, so a dummy ship lays nothing extra
+					predicted = vgapShipScreen.prototype.predictedMineLaying.call(vgapShipScreen.prototype, { id: -1, ammo: 0, torpedoid: 0, friendlycode: "" }).minefields;
+				}
+			} catch (err) {
+				console.log("MineLayering plugin: mine laying prediction failed, using current minefields. " + err);
+				predicted = null;
+			}
+			if (!predicted)
+				predicted = vgap.minefields;
+
+			var fields = [];
+			for (var i = 0; i < predicted.length; i++) {
+				var mf = predicted[i];
+				if (mf.ownerid != vgap.player.id)
+					continue;
+				var units = (mf.units != null) ? mf.units : mf.radius * mf.radius;
+				units = Math.floor(units * (1 - this.decayRate));
+				var radius = vgap.minefieldRadius(units);
+				if (radius > 0)
+					fields.push({ x: mf.x, y: mf.y, radius: radius, type: this.getFieldType(mf) });
+			}
+			return fields;
+		},
+
+		/**
+		 * Work out which grid squares let a ship lay a new field next turn that overlaps one of your fields, as row spans.
 		 * Same rule as the client's mine laying prediction: the mines join your closest field (by centre, first
 		 * in list order on a tie) of the same type, unless the ship is outside that field.
 		 * @return      {minY, maxY, rows: {y: [[x0, x1], ...]}}
 		 */
 		getLayeringSpans: function () {
-			var cache = this.spanCache;
-			if (cache && cache.minefields === vgap.minefields && cache.count == vgap.minefields.length && cache.fieldType == this.fieldType && cache.playerId == vgap.player.id)
-				return cache;
-
 			var fields = [];
 			var maxRadius = 0;
-			for (var i = 0; i < vgap.minefields.length; i++) {
-				var mf = vgap.minefields[i];
-				if (mf.ownerid == vgap.player.id && this.getFieldType(mf) == this.fieldType) {
-					fields.push(mf);
-					maxRadius = Math.max(maxRadius, mf.radius);
+			var nextTurn = this.getNextTurnMinefields();
+			for (var i = 0; i < nextTurn.length; i++) {
+				if (nextTurn[i].type == this.fieldType) {
+					fields.push(nextTurn[i]);
+					maxRadius = Math.max(maxRadius, nextTurn[i].radius);
 				}
 			}
+
+			//ship orders change the prediction, so the cache is keyed on the predicted fields themselves
+			var key = this.fieldType + "|" + fields.map(function (f) { return f.x + "," + f.y + "," + f.radius; }).join(";");
+			var cache = this.spanCache;
+			if (cache && cache.key == key)
+				return cache;
 
 			var rows = {};
 			var minY = Infinity;
@@ -271,7 +313,7 @@ function wrapper() { // wrapper for injection
 					rows[y] = spans;
 			}
 
-			this.spanCache = { minefields: vgap.minefields, count: vgap.minefields.length, fieldType: this.fieldType, playerId: vgap.player.id, minY: minY, maxY: maxY, rows: rows };
+			this.spanCache = { key: key, minY: minY, maxY: maxY, rows: rows };
 			return this.spanCache;
 		},
 
